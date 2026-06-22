@@ -1,5 +1,5 @@
 {
-  "extends": "../../tsconfig.json",
+  "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": false,
     "module": "NodeNext",
@@ -9,9 +9,8 @@
     "sourceMap": true,
     "rewriteRelativeImportExtensions": true,
     "outDir": "./dist",
-    "rootDir": "./src",
-    "paths": {}
+    "rootDir": "./src"
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/__tests__/**"]
+  "exclude": ["src/**/__tests__/**", "**/*.test.ts"]
 }
