@@ -4,7 +4,10 @@
   "description": "Brands, handoff envelope, and state/phase/invariant primitives for work-unit machines",
   "bounded": {
     "tagline": "Brands, handoff envelope, and state/phase/invariant primitives for work-unit machines",
-    "kind": "room"
+    "kind": "room",
+    "facet": "noun",
+    "role": "schema",
+    "domain": "state-machine/types"
   },
   "license": "MIT",
   "type": "module",
