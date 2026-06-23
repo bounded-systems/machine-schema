@@ -1,5 +1,25 @@
 # @bounded-systems/machine-schema
 
+## 0.3.0
+
+### Breaking Changes
+
+- Removed exported zod schema objects (`handoffTargetActor`, `handoffStatus`, `handoffDenialReason`, `handoffIntent`, `handoffPolicyKey`, `handoffWorkTreeRef`, `handoffEnvelope`, `handoffDrainOutcome`, `rawStateV1Schema`, `shaSchema`, `branchNameSchema`, `workUnitIdSchema`) from the public entry point. All schemas are now package-internal.
+
+### Migration
+
+Replace schema-object usages with the new explicit type + parse-function surface:
+
+- `handoffTargetActor.safeParse(v)` → `safeParseHandoffTargetActor(v)`
+- `handoffTargetActor.options` → `HANDOFF_TARGET_ACTOR_VALUES`
+- `handoffEnvelope.parse(v)` → `parseHandoffEnvelope(v)`
+- `rawStateV1Schema.parse(v)` → `parseRawStateV1(v)`
+- Brand types (`Sha`, `BranchName`, `WorkUnitId`) are now plain unique-symbol types rather than `z.infer<...>` aliases. Explicit `as Sha` casts continue to work unchanged.
+
+### Why
+
+Exported zod schema objects are JSR "slow types" — they require the TypeScript compiler to fully evaluate generic parameters, blocking JSR from scoring the `allFastCheck` gate. Moving to explicit types + thin parse seams earns the fast-types point (gate 2/5) without changing any runtime behavior.
+
 ## 0.2.0
 
 ### Minor Changes

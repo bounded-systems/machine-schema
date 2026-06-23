@@ -1,72 +1,80 @@
-// GH-2098 — the repo's first Zod `.brand<>()` types. Nominal safety for the
-// three core ID strings that flow through the raw-fact carrier
-// (`rawStateV1Schema`) and the handoff envelope: a work-unit id, a branch
-// name, and a git commit sha are no longer mutually assignable.
+// GH-2098 — nominal brand types for the three core ID strings.
 //
-// Layering note: this package peer-depends only on `zod`. The *canonical*
-// work-unit-id shape (the GH/NOTION/BD union) is registry-derived at runtime
-// in `src/machine/work_unit.ts` and must NOT be duplicated here. Zod brands
-// unify on the literal type argument, so `src/` can append
-// `.brand<"WorkUnitId">()` to its canonical schema and produce the SAME TS
-// type as the permissive carrier below — no symbol import across the layer.
-//
-// All three carriers are permissive on shape (`min(1)`): branding is nominal
-// typing, not a new validation gate. `derivePhase`/`assertInvariants`
-// re-`.parse()` the raw-fact schema, so tightening shape here would change
-// runtime acceptance — out of scope for this pure type-nominalization step.
+// Layering note: schemas are package-internal (consumed by state.ts).
+// Only the explicit types and thin parse functions are public API.
+// This keeps the public entry point free of zod schema objects (JSR fast-types).
 
 import { z } from "zod";
 
+// ── brand markers (unique symbols — nominal typing, no zod dependency) ────
+
+declare const _sha: unique symbol;
+declare const _branch: unique symbol;
+declare const _unit: unique symbol;
+
 // ── git commit sha ─────────────────────────────────────────────────────────
 
-/** Zod schema for a {@link Sha}: validates a non-empty string and brands it as `"Sha"`. */
-export const shaSchema = z.string().min(1).brand<"Sha">();
-
 /** A git commit SHA — a non-empty string nominally typed to prevent accidental mixing with branch names or work-unit ids. */
-export type Sha = z.infer<typeof shaSchema>;
+export type Sha = string & { readonly [_sha]: void };
 
 // ── branch name ────────────────────────────────────────────────────────────
 
-/** Zod schema for a {@link BranchName}: validates a non-empty string and brands it as `"BranchName"`. */
-export const branchNameSchema = z.string().min(1).brand<"BranchName">();
-
 /** A git branch name — a non-empty string nominally typed to prevent mixing with {@link Sha} or {@link WorkUnitId}. */
-export type BranchName = z.infer<typeof branchNameSchema>;
+export type BranchName = string & { readonly [_branch]: void };
 
 // ── work-unit id ───────────────────────────────────────────────────────────
 //
-// Permissive carrier. `src/machine/work_unit.ts` owns canonical-shape
-// validation and brands its registry-derived schema with the same
-// `"WorkUnitId"` tag, yielding an identical TS type.
+// Permissive carrier. `src/machine/work_unit.ts` in prx owns canonical-shape
+// validation (the GH/NOTION/BD union). To produce a WorkUnitId, callers must
+// go through parseWorkUnitId (non-empty gate) or explicit `as WorkUnitId` cast
+// at a validated boundary.
 
-/** Zod schema for a {@link WorkUnitId}: validates a non-empty string and brands it as `"WorkUnitId"`. */
-export const workUnitIdSchema = z.string().min(1).brand<"WorkUnitId">();
+/** A work-unit identifier (e.g. `"GH-1234"`) — a non-empty string nominally typed to prevent mixing with {@link Sha} or {@link BranchName}. Permissive carrier; prx's `work_unit.ts` owns canonical-shape validation. */
+export type WorkUnitId = string & { readonly [_unit]: void };
 
-/** A work-unit identifier (e.g. `"GH-1234"`) — a non-empty string nominally typed to prevent mixing with {@link Sha} or {@link BranchName}. Permissive carrier; `src/machine/work_unit.ts` owns canonical-shape validation. */
-export type WorkUnitId = z.infer<typeof workUnitIdSchema>;
+// ── internal schemas (NOT re-exported from index.ts) ─────────────────────────
+//
+// These are exported from brands.ts so state.ts can import them for building
+// rawStateV1Schema. They are explicitly excluded from the public index.ts.
+
+/** @internal */
+export const shaSchema = z.string().min(1).transform((v) => v as Sha);
+/** @internal */
+export const branchNameSchema = z.string().min(1).transform((v) => v as BranchName);
+/** @internal */
+export const workUnitIdSchema = z.string().min(1).transform((v) => v as WorkUnitId);
 
 // ── thin parse seams ─────────────────────────────────────────────────────────
 //
 // Brand a raw string on the way in at a validated boundary. Nullable variants
-// pass `null` through untouched (the schema fields they back are nullable).
+// pass `null` through untouched.
 
 /** Parse and brand a raw string as a {@link Sha}. Throws if the value is empty. */
-export const parseSha = (value: string): Sha => shaSchema.parse(value);
+export const parseSha = (value: string): Sha => {
+  if (value.length === 0) throw new Error("Sha must be a non-empty string");
+  return value as Sha;
+};
 
 /** Parse and brand a raw string as a {@link BranchName}. Throws if the value is empty. */
-export const parseBranchName = (value: string): BranchName => branchNameSchema.parse(value);
+export const parseBranchName = (value: string): BranchName => {
+  if (value.length === 0) throw new Error("BranchName must be a non-empty string");
+  return value as BranchName;
+};
 
 /** Parse and brand a raw string as a {@link WorkUnitId}. Throws if the value is empty. */
-export const parseWorkUnitId = (value: string): WorkUnitId => workUnitIdSchema.parse(value);
+export const parseWorkUnitId = (value: string): WorkUnitId => {
+  if (value.length === 0) throw new Error("WorkUnitId must be a non-empty string");
+  return value as WorkUnitId;
+};
 
 /** Parse and brand a nullable string as `Sha | null` — passes `null` through without validation. */
 export const parseShaNullable = (value: string | null): Sha | null =>
-  value === null ? null : shaSchema.parse(value);
+  value === null ? null : parseSha(value);
 
 /** Parse and brand a nullable string as `BranchName | null` — passes `null` through without validation. */
 export const parseBranchNameNullable = (value: string | null): BranchName | null =>
-  value === null ? null : branchNameSchema.parse(value);
+  value === null ? null : parseBranchName(value);
 
 /** Parse and brand a nullable string as `WorkUnitId | null` — passes `null` through without validation. */
 export const parseWorkUnitIdNullable = (value: string | null): WorkUnitId | null =>
-  value === null ? null : workUnitIdSchema.parse(value);
+  value === null ? null : parseWorkUnitId(value);

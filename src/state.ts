@@ -1,6 +1,13 @@
 import { z } from "zod";
 
-import { branchNameSchema, shaSchema, workUnitIdSchema } from "./brands.ts";
+import {
+  type BranchName,
+  type Sha,
+  type WorkUnitId,
+  branchNameSchema,
+  shaSchema,
+  workUnitIdSchema,
+} from "./brands.ts";
 
 /** All valid workflow phase names in precedence order (earliest → latest). */
 export const workflowPhases = [
@@ -192,12 +199,10 @@ export const invariantSpecs = [
 
 const rfc3339UtcString = z.string().datetime({ offset: true });
 
-/**
- * Zod schema validating a {@link RawStateV1} snapshot — the complete, unprocessed
- * machine-observable state of a work unit (artifacts, signals, sync metadata).
- * Use {@link derivePhase} to compute a {@link WorkflowPhase} from a validated snapshot.
- */
-export const rawStateV1Schema = z
+// rawStateV1Schema is package-internal — the public surface is parseRawStateV1().
+// Keeping it unexported removes a slow-type (ZodObject) from the public entry point
+// without changing any runtime behavior.
+const rawStateV1Schema = z
   .object({
     unitId: workUnitIdSchema,
     artifacts: z
@@ -301,8 +306,98 @@ export const rawStateV1Schema = z
   })
   .strict();
 
-/** The complete raw state snapshot of a work unit, inferred from {@link rawStateV1Schema}. */
-export type RawStateV1 = z.infer<typeof rawStateV1Schema>;
+// ── explicit public type (no z.infer — JSR fast-types) ──────────────────────
+//
+// Drift guard below ensures this stays in sync with rawStateV1Schema.
+
+/** The complete raw state snapshot of a work unit. Pass to {@link parseRawStateV1}, {@link derivePhase}, or {@link assertInvariants}. */
+export type RawStateV1 = {
+  unitId: WorkUnitId;
+  artifacts: {
+    ticket: {
+      exists: boolean;
+      id: string | null;
+      system: "bd" | "notion" | "jira" | "other";
+      url: string | null;
+    };
+    worktree: {
+      exists: boolean;
+      path: string | null;
+      checkedOutBranch: BranchName | null;
+      headSha: Sha | null;
+    };
+    branch: {
+      name: BranchName | null;
+      existsLocal: boolean;
+      existsRemote: boolean;
+      ahead: number;
+      behind: number;
+      headShaLocal: Sha | null;
+      headShaRemote: Sha | null;
+    };
+    pr: {
+      exists: boolean;
+      number: number | null;
+      state: "none" | "open" | "closed" | "merged";
+      isDraft: boolean | null;
+      headRef: BranchName | null;
+      baseRef: BranchName | null;
+      url: string | null;
+      autoMergeRequest?:
+        | {
+            enabledBy: string | null;
+            mergeMethod: "MERGE" | "SQUASH" | "REBASE";
+          }
+        | null
+        | undefined;
+    };
+  };
+  signals: {
+    review: {
+      decision: "none" | "changes_requested" | "approved";
+      reviewersRequested: boolean;
+      unresolvedThreads: number;
+    };
+    ci: {
+      state: "none" | "queued" | "in_progress" | "passed" | "failed" | "cancelled";
+      requiredTotal: number;
+      requiredPassed: number;
+      failing: string[];
+    };
+    mergeability: {
+      state: "unknown" | "mergeable" | "blocked" | "conflicting" | "behind" | "draft";
+      blockedReasons: string[];
+    };
+  };
+  sync: {
+    remoteFresh: boolean;
+    ticketLinkedToPR: boolean | null;
+  };
+  meta: {
+    observedAt: string;
+    sources: {
+      git: string;
+      gh: string;
+      ticketSystem: string | null;
+    };
+  };
+};
+
+// Compile-time drift guard — fails if RawStateV1 diverges from the schema output.
+type _Eq<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+const _drift: _Eq<RawStateV1, z.output<typeof rawStateV1Schema>> = true;
+void _drift;
+
+// ── public parse seam ─────────────────────────────────────────────────────────
+
+/**
+ * Validate and parse an unknown value as a {@link RawStateV1} snapshot.
+ * Throws a ZodError on invalid input. Prefer this over direct schema access —
+ * the schema itself is not part of the public API.
+ */
+export function parseRawStateV1(raw: unknown): RawStateV1 {
+  return rawStateV1Schema.parse(raw);
+}
 
 /** A single invariant violation: the invariant id (e.g. `"I01"`), severity, and a human-readable message. */
 export type InvariantFinding = {
@@ -328,7 +423,7 @@ export type InvariantReport = {
  * `rawStateV1Schema.parse(...)` or a freshly-constructed `RawStateV1`.
  */
 export function derivePhase(rawInput: RawStateV1): WorkflowPhase {
-  const raw = rawStateV1Schema.parse(rawInput);
+  const raw = parseRawStateV1(rawInput);
   const { artifacts, signals, sync } = raw;
   const { pr, worktree, branch } = artifacts;
 
@@ -389,7 +484,7 @@ export function derivePhase(rawInput: RawStateV1): WorkflowPhase {
  * machine should not have produced.
  */
 export function assertInvariants(rawInput: RawStateV1, phase: WorkflowPhase): InvariantReport {
-  const raw = rawStateV1Schema.parse(rawInput);
+  const raw = parseRawStateV1(rawInput);
   const findings: InvariantFinding[] = [];
   const hard = (id: string, condition: boolean, message: string) => {
     if (!condition) findings.push({ id, severity: "hard", message });

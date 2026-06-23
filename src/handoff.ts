@@ -18,19 +18,28 @@
 // `sha256:` handle; the handle lives in `inputRefs[]`. Satisfies I-AUD2
 // (artifact lineage) by construction; the bd row stays small for cheap
 // prefix scans.
+//
+// All zod schemas are package-internal — the public API is explicit types
+// and thin parse/safe-parse seams. This keeps the public entry point free
+// of slow-type schema objects (JSR fast-types gate).
 
 import { z } from "zod";
 
-import { workUnitIdSchema } from "./brands.ts";
+import { workUnitIdSchema, type WorkUnitId } from "./brands.ts";
 
 // ── recipient actors ──────────────────────────────────────────────────────
-//
-// The open set of recipient actors. Extend as new recipients land — each
-// recipient registers a drain adapter and lands its own Zod schemas for the
-// verbs it accepts. GH-1397 ships infrastructure only; the first real
-// adapter is `publisher` (GH-1564, blocked-by GH-1397).
-/** Zod enum of valid handoff recipient actors (`"publisher" | "keeper" | "triage" | "submit" | "author" | "noop"`). */
-export const handoffTargetActor = z.enum([
+
+/** The recipient actor for a handoff envelope — one of `"publisher" | "keeper" | "triage" | "submit" | "author" | "noop"`. */
+export type HandoffTargetActor =
+  | "publisher"
+  | "keeper"
+  | "triage"
+  | "submit"
+  | "author"
+  | "noop";
+
+/** All valid {@link HandoffTargetActor} values, in declaration order. Use instead of a schema's `.options` array. */
+export const HANDOFF_TARGET_ACTOR_VALUES: readonly HandoffTargetActor[] = [
   "publisher",
   // GH-2348.3: keeper owns git-write (push/branch) — the recipient for denied
   // git-tool verbs, split out of publisher (which keeps the forge pr.* surface).
@@ -39,149 +48,226 @@ export const handoffTargetActor = z.enum([
   "submit",
   "author",
   // Generic no-op adapter — drain plumbing for end-to-end test coverage.
-  // Real recipients ship in their own tickets; `noop` stays as the
-  // contract-stable hook for tests and as a safety net when a real
-  // recipient adapter has not been registered.
   "noop",
-]);
-/** The recipient actor for a handoff envelope — one of `"publisher" | "keeper" | "triage" | "submit" | "author" | "noop"`. */
-export type HandoffTargetActor = z.infer<typeof handoffTargetActor>;
+] as const satisfies readonly HandoffTargetActor[];
 
 // ── envelope status ───────────────────────────────────────────────────────
+
+/** The durable lifecycle status of a handoff envelope. Mirrors the `handoffMachine` state graph. */
+export type HandoffStatus =
+  | "pending"
+  | "claimed"
+  | "draining"
+  | "done"
+  | "failed"
+  | "abandoned";
+
+// ── denial provenance ─────────────────────────────────────────────────────
+
+/** The denial reason for a handoff: why the verb was denied and enqueued. */
+export type HandoffDenialReason =
+  | "blocked"
+  | "not-allowlisted-for-role"
+  | "unknown-tool"
+  | "flag-layer-deny";
+
+// ── intent payload ────────────────────────────────────────────────────────
+
+/** The intent payload of a handoff: a verb name and opaque args that the draining recipient validates. */
+export type HandoffIntent = {
+  /** Non-empty verb name, opaque to the queue. */
+  verb: string;
+  /** Verb-specific args — the recipient validates at drain time. */
+  args: unknown;
+};
+
+// ── policy-key tag (audit join hint) ──────────────────────────────────────
+
+/** A policy-key tag: tool + subcommand + state + role, carried on policy-table deny enqueues for audit correlation. */
+export type HandoffPolicyKey = {
+  tool: string;
+  subcommand: string;
+  state: string;
+  role: string;
+};
+
+// ── worktree ref ──────────────────────────────────────────────────────────
+
+/** A worktree reference: absolute `path` and `branch` name. Used by publisher and author drain adapters. */
+export type HandoffWorkTreeRef = {
+  path: string;
+  branch: string;
+};
+
+// ── envelope ──────────────────────────────────────────────────────────────
+
+/**
+ * A fully-parsed handoff envelope — one row per harness-denied verb.
+ * Persisted in bd memory; large `args` spill to plan-store CAS via `inputRefs`.
+ * All fields have defaults applied. Use when reading from bd memory.
+ */
+export type HandoffEnvelope = {
+  /** ULID. Stable identity for replay and audit joins. */
+  id: string;
+  /** Idempotency key per I-HQ3. */
+  dedupKey: string;
+  /** UoW lineage. Nullable for ambient enqueues. */
+  workUnitId: WorkUnitId | null;
+  /** Refuses cross-repo enqueue when this disagrees with the current repo. */
+  repoSlug: string;
+  /** Originating actor that produced the deny. */
+  sourceActor: string;
+  /** Originating session id (for audit lookup). */
+  sourceSessionId?: string | undefined;
+  /** Recipient actor. */
+  targetActor: HandoffTargetActor;
+  /** Verb + opaque args. Drainer validates `args` at the boundary. */
+  intent: HandoffIntent;
+  /** CAS handles (`cas://sha256:...`, `scout://`, `plan://`, `submit://`). Defaults to `[]`. */
+  inputRefs: string[];
+  /** `event_id` of the deny that produced this handoff. */
+  causedBy?: string | undefined;
+  /** Why the verb was denied. */
+  denialReason: HandoffDenialReason;
+  /** Optional join-tag for policy-table denies. */
+  policyKey?: HandoffPolicyKey | undefined;
+  enqueuedAt: string;
+  status: HandoffStatus;
+  /** Claimant — set on CLAIM, cleared on RELEASE. */
+  claimedBy?: string | undefined;
+  claimAt?: string | undefined;
+  claimTtlSec?: number | undefined;
+  /** Defaults to `0`. */
+  attempts: number;
+  /** Defaults to `3`. */
+  maxAttempts: number;
+  lastError?: string | undefined;
+  workTreeRef?: HandoffWorkTreeRef | undefined;
+};
+
+/** The input shape of a {@link HandoffEnvelope} — fields with defaults (`inputRefs`, `attempts`, `maxAttempts`) are optional. Use when constructing an envelope for enqueueing. */
+export type HandoffEnvelopeInput = Omit<
+  HandoffEnvelope,
+  "inputRefs" | "attempts" | "maxAttempts"
+> & {
+  inputRefs?: string[] | undefined;
+  attempts?: number | undefined;
+  maxAttempts?: number | undefined;
+};
+
+// ── drain outcome ─────────────────────────────────────────────────────────
+
+/** The outcome of a drain adapter call: `{ ok: true }` on success, `{ ok: false, error }` on failure. */
+export type HandoffDrainOutcome = { ok: true } | { ok: false; error: string };
+
+// ── internal schemas ──────────────────────────────────────────────────────
 //
-// Mirror of the `handoffMachine` state graph (src/machine/machines/handoff.ts).
-// The bd row is the durable projection of the machine's state.
-/** Zod enum for the lifecycle status of a handoff envelope. Mirrors the `handoffMachine` state graph. */
-export const handoffStatus = z.enum([
+// NOT exported — use the parse functions below as the public API.
+
+const _handoffTargetActor = z.enum([
+  "publisher",
+  "keeper",
+  "triage",
+  "submit",
+  "author",
+  "noop",
+] as const);
+
+const _handoffStatus = z.enum([
   "pending",
   "claimed",
   "draining",
   "done",
   "failed",
   "abandoned",
-]);
-/** The durable lifecycle status of a handoff envelope: `"pending" | "claimed" | "draining" | "done" | "failed" | "abandoned"`. */
-export type HandoffStatus = z.infer<typeof handoffStatus>;
+] as const);
 
-// ── denial provenance ─────────────────────────────────────────────────────
-//
-// Mirrors `FeasibilityReason` (src/tools/policy.ts:179) for the policy-table
-// deny path, and adds `flag-layer-deny` for the `disallowedTools` /
-// `runtime_profiles.ts` rejection seam.
-/** Zod enum for the reason a verb was denied and enqueued as a handoff. */
-export const handoffDenialReason = z.enum([
+const _handoffDenialReason = z.enum([
   "blocked",
   "not-allowlisted-for-role",
   "unknown-tool",
   "flag-layer-deny",
-]);
-/** The denial reason for a handoff: `"blocked" | "not-allowlisted-for-role" | "unknown-tool" | "flag-layer-deny"`. */
-export type HandoffDenialReason = z.infer<typeof handoffDenialReason>;
+] as const);
 
-// ── intent payload ────────────────────────────────────────────────────────
-//
-// `verb` is opaque to the queue. `args` is `unknown` — the drainer for each
-// recipient validates the verb-specific arg shape with its own Zod at the
-// drain boundary (per I-HQ2: drain-time re-auth is the recipient's job).
-/** Zod schema for the intent payload: a verb name (non-empty) and opaque args validated at drain time. */
-export const handoffIntent = z.object({
+const _handoffIntent = z.object({
   verb: z.string().min(1),
   args: z.unknown(),
 });
-/** The intent payload of a handoff: a verb name and opaque args that the draining recipient validates. */
-export type HandoffIntent = z.infer<typeof handoffIntent>;
 
-// ── policy-key tag (audit join hint) ──────────────────────────────────────
-//
-// Optional tag carried on policy-table denies so the audit substrate can
-// answer "denies without enqueue" with a cheap join. Absent on flag-layer
-// denies (the disallowedTools list does not carry tool/subcommand).
-/** Zod schema for the policy-key tag: tool, subcommand, state, and role — carried on policy-table deny enqueues as an audit join hint. */
-export const handoffPolicyKey = z.object({
+const _handoffPolicyKey = z.object({
   tool: z.string(),
   subcommand: z.string(),
   state: z.string(),
   role: z.string(),
 });
-/** A policy-key tag: tool + subcommand + state + role, carried on policy-table deny enqueues for audit correlation. */
-export type HandoffPolicyKey = z.infer<typeof handoffPolicyKey>;
 
-// ── worktree ref (publisher / author adapters need this) ──────────────────
-/** Zod schema for a worktree reference: absolute filesystem `path` and `branch` name. Required by publisher and author adapters. */
-export const handoffWorkTreeRef = z.object({
+const _handoffWorkTreeRef = z.object({
   path: z.string(),
   branch: z.string(),
 });
-/** A worktree reference: absolute `path` and `branch` name. Used by publisher and author drain adapters. */
-export type HandoffWorkTreeRef = z.infer<typeof handoffWorkTreeRef>;
 
-// ── envelope ──────────────────────────────────────────────────────────────
-//
-// One row per harness-denied verb. Persisted in bd memory keyed
-// `handoff/<targetActor>/<workUnitId|none>/<id>`; large `args` spill to
-// plan-store CAS, with handles in `inputRefs[]`.
-//
-// Cross-repo handoff is out of scope: enqueue refuses when
-// `repoSlug ≠ currentRepo`. A future epic owns cross-repo routing.
-/**
- * Zod schema for a handoff envelope — one row per harness-denied verb.
- * Persisted in bd memory; large `args` spill to plan-store CAS via `inputRefs`.
- */
-export const handoffEnvelope = z.object({
-  /** ULID. Stable identity for replay and audit joins. */
+const _handoffEnvelope = z.object({
   id: z.string().min(1),
-  /**
-   * `sha256(uow_id | targetActor | verb | argsCanonical)` — idempotency
-   * key per I-HQ3. A second enqueue with the same `dedupKey` returns the
-   * existing `handoff_id` without writing a new row.
-   */
   dedupKey: z.string().min(1),
-  /** UoW (work-unit) lineage. Nullable for ambient enqueues (rare). */
   workUnitId: workUnitIdSchema.nullable(),
-  /** Refuses cross-repo enqueue when this disagrees with the current repo. */
   repoSlug: z.string().min(1),
-  /** Originating actor that produced the deny: "executor" | "intake" | ... */
   sourceActor: z.string().min(1),
-  /** Originating session id (for audit lookup of the deny event). */
   sourceSessionId: z.string().optional(),
-  /** Recipient actor. Each one registers a drain adapter. */
-  targetActor: handoffTargetActor,
-  /** Verb + opaque args. Drainer validates `args` at the boundary. */
-  intent: handoffIntent,
-  /** CAS handles (`cas://sha256:...`, `scout://`, `plan://`, `submit://`). */
+  targetActor: _handoffTargetActor,
+  intent: _handoffIntent,
   inputRefs: z.array(z.string()).default([]),
-  /** `event_id` of the deny that produced this handoff (audit join). */
   causedBy: z.string().optional(),
-  denialReason: handoffDenialReason,
-  /** Optional join-tag for policy-table denies. */
-  policyKey: handoffPolicyKey.optional(),
+  denialReason: _handoffDenialReason,
+  policyKey: _handoffPolicyKey.optional(),
   enqueuedAt: z.string().datetime({ offset: true }),
-  status: handoffStatus,
-  /** Claimant ("publisher", "triage", ...) — set on CLAIM, cleared on RELEASE. */
+  status: _handoffStatus,
   claimedBy: z.string().optional(),
   claimAt: z.string().datetime({ offset: true }).optional(),
   claimTtlSec: z.number().int().positive().optional(),
   attempts: z.number().int().nonnegative().default(0),
   maxAttempts: z.number().int().positive().default(3),
   lastError: z.string().optional(),
-  workTreeRef: handoffWorkTreeRef.optional(),
+  workTreeRef: _handoffWorkTreeRef.optional(),
 });
-/** A fully-parsed handoff envelope: all fields validated and defaults applied. Use when reading from bd memory. */
-export type HandoffEnvelope = z.infer<typeof handoffEnvelope>;
 
-/** The input shape of a {@link HandoffEnvelope} — fields with defaults (`inputRefs`, `attempts`, `maxAttempts`) are optional. Use when constructing an envelope for enqueueing. */
-export type HandoffEnvelopeInput = z.input<typeof handoffEnvelope>;
-
-// ── drain outcome ─────────────────────────────────────────────────────────
-//
-// Adapter contract: every recipient adapter returns one of these. The
-// drainer turns `{ ok: false }` into `HANDOFF_FAILED` and the machine
-// decides retry vs. abandon via `attempts < maxAttempts`.
-/** Zod schema for the outcome of a drain adapter: `{ ok: true }` on success or `{ ok: false, error: string }` on failure. */
-export const handoffDrainOutcome = z.union([
+const _handoffDrainOutcome = z.union([
   z.object({ ok: z.literal(true) }),
   z.object({ ok: z.literal(false), error: z.string() }),
 ]);
 
-/** The outcome of a drain adapter call: `{ ok: true }` on success, `{ ok: false, error }` on failure. */
-export type HandoffDrainOutcome = z.infer<typeof handoffDrainOutcome>;
+// Compile-time drift guards — fail if explicit types diverge from schema output.
+type _Eq<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+const _driftEnvelope: _Eq<HandoffEnvelope, z.output<typeof _handoffEnvelope>> = true;
+void _driftEnvelope;
+const _driftOutcome: _Eq<HandoffDrainOutcome, z.output<typeof _handoffDrainOutcome>> = true;
+void _driftOutcome;
+
+// ── public parse seams ─────────────────────────────────────────────────────
+
+/**
+ * Validate and parse an unknown value as a {@link HandoffEnvelope}.
+ * Throws a ZodError on invalid input. Defaults are applied (`inputRefs=[]`, `attempts=0`, `maxAttempts=3`).
+ */
+export function parseHandoffEnvelope(raw: unknown): HandoffEnvelope {
+  return _handoffEnvelope.parse(raw);
+}
+
+/**
+ * Safe-parse an unknown value as a {@link HandoffTargetActor}.
+ * Returns `{ success: true, data }` on match, `{ success: false }` otherwise.
+ */
+export function safeParseHandoffTargetActor(
+  value: unknown,
+): { success: true; data: HandoffTargetActor } | { success: false } {
+  const result = _handoffTargetActor.safeParse(value);
+  if (result.success) return { success: true, data: result.data };
+  return { success: false };
+}
+
+/**
+ * Validate and parse an unknown value as a {@link HandoffDrainOutcome}.
+ * Throws a ZodError on invalid input.
+ */
+export function parseHandoffDrainOutcome(raw: unknown): HandoffDrainOutcome {
+  return _handoffDrainOutcome.parse(raw);
+}
