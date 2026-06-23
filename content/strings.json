@@ -1,0 +1,10 @@
+{
+  "name": {
+    "type": "name",
+    "value": "Machine Schema"
+  },
+  "description": {
+    "type": "meta",
+    "value": "Brands, handoff envelope, and state/phase/invariant primitives for work-unit machines"
+  }
+}
