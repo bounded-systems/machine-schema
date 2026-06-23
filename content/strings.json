@@ -3,8 +3,16 @@
     "type": "name",
     "value": "Machine Schema"
   },
+  "tagline": {
+    "type": "tagline",
+    "value": "Schema primitives for work-unit state machines: branded types, the handoff envelope, and the state / phase / invarian…"
+  },
   "description": {
     "type": "meta",
-    "value": "Brands, handoff envelope, and state/phase/invariant primitives for work-unit machines"
+    "value": "Schema primitives for work-unit state machines: branded types, the handoff envelope, and the state / phase / invariant building blocks.  This is the shared vocabulary the machines are written against — branded identifiers that can't be confused with bare strings, the envelope …"
+  },
+  "keywords": {
+    "type": "body",
+    "value": "SCHEMA · BRANDS · STATE-MACHINE · WORK-UNIT · ZOD"
   }
 }
