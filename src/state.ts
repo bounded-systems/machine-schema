@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { branchNameSchema, shaSchema, workUnitIdSchema } from "./brands.ts";
 
+/** All valid workflow phase names in precedence order (earliest → latest). */
 export const workflowPhases = [
   "cleaned",
   "merged",
@@ -21,8 +22,10 @@ export const workflowPhases = [
   "in_review",
 ] as const;
 
+/** A single phase in the work-unit lifecycle (one of the {@link workflowPhases} values). */
 export type WorkflowPhase = (typeof workflowPhases)[number];
 
+/** Work-unit phases in precedence order — earlier phases sort before later ones. Alias of {@link workflowPhases} with an explicit readonly type. */
 export const phasePrecedence: readonly WorkflowPhase[] = [
   "cleaned",
   "merged",
@@ -42,6 +45,12 @@ export const phasePrecedence: readonly WorkflowPhase[] = [
   "in_review",
 ] as const;
 
+/**
+ * Machine-checked invariant specs for the work-unit lifecycle, expressed as
+ * human-readable strings (e.g. `"I01: pr.exists => (branch.existsLocal || branch.existsRemote)"`).
+ * Used by `assertInvariants` to label findings; the list is the canonical source for which
+ * invariants exist and what they mean.
+ */
 export const invariantSpecs = [
   "I01: pr.exists => (branch.existsLocal || branch.existsRemote)",
   "I02: pr.exists => pr.headRef == branch.name",
@@ -183,6 +192,11 @@ export const invariantSpecs = [
 
 const rfc3339UtcString = z.string().datetime({ offset: true });
 
+/**
+ * Zod schema validating a {@link RawStateV1} snapshot — the complete, unprocessed
+ * machine-observable state of a work unit (artifacts, signals, sync metadata).
+ * Use {@link derivePhase} to compute a {@link WorkflowPhase} from a validated snapshot.
+ */
 export const rawStateV1Schema = z
   .object({
     unitId: workUnitIdSchema,
@@ -287,19 +301,32 @@ export const rawStateV1Schema = z
   })
   .strict();
 
+/** The complete raw state snapshot of a work unit, inferred from {@link rawStateV1Schema}. */
 export type RawStateV1 = z.infer<typeof rawStateV1Schema>;
 
+/** A single invariant violation: the invariant id (e.g. `"I01"`), severity, and a human-readable message. */
 export type InvariantFinding = {
+  /** Invariant identifier (e.g. `"I01"`, `"I-DR1"`). */
   id: string;
+  /** All current findings are `"hard"` — a violated invariant is always a hard fault. */
   severity: "hard";
+  /** Human-readable description of which condition was violated. */
   message: string;
 };
 
+/** The result of running {@link assertInvariants}: whether the snapshot is valid, and any violations found. */
 export type InvariantReport = {
+  /** True iff no hard invariant violations were found. */
   valid: boolean;
+  /** The list of violations (empty when valid). */
   findings: InvariantFinding[];
 };
 
+/**
+ * Derive the {@link WorkflowPhase} for a work unit from its raw state snapshot.
+ * Re-parses `rawInput` through {@link rawStateV1Schema} — pass the output of
+ * `rawStateV1Schema.parse(...)` or a freshly-constructed `RawStateV1`.
+ */
 export function derivePhase(rawInput: RawStateV1): WorkflowPhase {
   const raw = rawStateV1Schema.parse(rawInput);
   const { artifacts, signals, sync } = raw;
@@ -355,6 +382,12 @@ export function derivePhase(rawInput: RawStateV1): WorkflowPhase {
   return "blocked";
 }
 
+/**
+ * Check all machine invariants against a raw state snapshot at the given phase.
+ * Returns an {@link InvariantReport} with `valid: true` when no violations are found.
+ * Hard findings (violations) mean the snapshot is in an inconsistent state that the
+ * machine should not have produced.
+ */
 export function assertInvariants(rawInput: RawStateV1, phase: WorkflowPhase): InvariantReport {
   const raw = rawStateV1Schema.parse(rawInput);
   const findings: InvariantFinding[] = [];

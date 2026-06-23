@@ -18,11 +18,19 @@
 import { z } from "zod";
 
 // ── git commit sha ─────────────────────────────────────────────────────────
+
+/** Zod schema for a {@link Sha}: validates a non-empty string and brands it as `"Sha"`. */
 export const shaSchema = z.string().min(1).brand<"Sha">();
+
+/** A git commit SHA — a non-empty string nominally typed to prevent accidental mixing with branch names or work-unit ids. */
 export type Sha = z.infer<typeof shaSchema>;
 
 // ── branch name ────────────────────────────────────────────────────────────
+
+/** Zod schema for a {@link BranchName}: validates a non-empty string and brands it as `"BranchName"`. */
 export const branchNameSchema = z.string().min(1).brand<"BranchName">();
+
+/** A git branch name — a non-empty string nominally typed to prevent mixing with {@link Sha} or {@link WorkUnitId}. */
 export type BranchName = z.infer<typeof branchNameSchema>;
 
 // ── work-unit id ───────────────────────────────────────────────────────────
@@ -30,20 +38,35 @@ export type BranchName = z.infer<typeof branchNameSchema>;
 // Permissive carrier. `src/machine/work_unit.ts` owns canonical-shape
 // validation and brands its registry-derived schema with the same
 // `"WorkUnitId"` tag, yielding an identical TS type.
+
+/** Zod schema for a {@link WorkUnitId}: validates a non-empty string and brands it as `"WorkUnitId"`. */
 export const workUnitIdSchema = z.string().min(1).brand<"WorkUnitId">();
+
+/** A work-unit identifier (e.g. `"GH-1234"`) — a non-empty string nominally typed to prevent mixing with {@link Sha} or {@link BranchName}. Permissive carrier; `src/machine/work_unit.ts` owns canonical-shape validation. */
 export type WorkUnitId = z.infer<typeof workUnitIdSchema>;
 
 // ── thin parse seams ─────────────────────────────────────────────────────────
 //
 // Brand a raw string on the way in at a validated boundary. Nullable variants
 // pass `null` through untouched (the schema fields they back are nullable).
+
+/** Parse and brand a raw string as a {@link Sha}. Throws if the value is empty. */
 export const parseSha = (value: string): Sha => shaSchema.parse(value);
+
+/** Parse and brand a raw string as a {@link BranchName}. Throws if the value is empty. */
 export const parseBranchName = (value: string): BranchName => branchNameSchema.parse(value);
+
+/** Parse and brand a raw string as a {@link WorkUnitId}. Throws if the value is empty. */
 export const parseWorkUnitId = (value: string): WorkUnitId => workUnitIdSchema.parse(value);
 
+/** Parse and brand a nullable string as `Sha | null` — passes `null` through without validation. */
 export const parseShaNullable = (value: string | null): Sha | null =>
   value === null ? null : shaSchema.parse(value);
+
+/** Parse and brand a nullable string as `BranchName | null` — passes `null` through without validation. */
 export const parseBranchNameNullable = (value: string | null): BranchName | null =>
   value === null ? null : branchNameSchema.parse(value);
+
+/** Parse and brand a nullable string as `WorkUnitId | null` — passes `null` through without validation. */
 export const parseWorkUnitIdNullable = (value: string | null): WorkUnitId | null =>
   value === null ? null : workUnitIdSchema.parse(value);

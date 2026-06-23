@@ -29,6 +29,7 @@ import { workUnitIdSchema } from "./brands.ts";
 // recipient registers a drain adapter and lands its own Zod schemas for the
 // verbs it accepts. GH-1397 ships infrastructure only; the first real
 // adapter is `publisher` (GH-1564, blocked-by GH-1397).
+/** Zod enum of valid handoff recipient actors (`"publisher" | "keeper" | "triage" | "submit" | "author" | "noop"`). */
 export const handoffTargetActor = z.enum([
   "publisher",
   // GH-2348.3: keeper owns git-write (push/branch) — the recipient for denied
@@ -43,12 +44,14 @@ export const handoffTargetActor = z.enum([
   // recipient adapter has not been registered.
   "noop",
 ]);
+/** The recipient actor for a handoff envelope — one of `"publisher" | "keeper" | "triage" | "submit" | "author" | "noop"`. */
 export type HandoffTargetActor = z.infer<typeof handoffTargetActor>;
 
 // ── envelope status ───────────────────────────────────────────────────────
 //
 // Mirror of the `handoffMachine` state graph (src/machine/machines/handoff.ts).
 // The bd row is the durable projection of the machine's state.
+/** Zod enum for the lifecycle status of a handoff envelope. Mirrors the `handoffMachine` state graph. */
 export const handoffStatus = z.enum([
   "pending",
   "claimed",
@@ -57,6 +60,7 @@ export const handoffStatus = z.enum([
   "failed",
   "abandoned",
 ]);
+/** The durable lifecycle status of a handoff envelope: `"pending" | "claimed" | "draining" | "done" | "failed" | "abandoned"`. */
 export type HandoffStatus = z.infer<typeof handoffStatus>;
 
 // ── denial provenance ─────────────────────────────────────────────────────
@@ -64,12 +68,14 @@ export type HandoffStatus = z.infer<typeof handoffStatus>;
 // Mirrors `FeasibilityReason` (src/tools/policy.ts:179) for the policy-table
 // deny path, and adds `flag-layer-deny` for the `disallowedTools` /
 // `runtime_profiles.ts` rejection seam.
+/** Zod enum for the reason a verb was denied and enqueued as a handoff. */
 export const handoffDenialReason = z.enum([
   "blocked",
   "not-allowlisted-for-role",
   "unknown-tool",
   "flag-layer-deny",
 ]);
+/** The denial reason for a handoff: `"blocked" | "not-allowlisted-for-role" | "unknown-tool" | "flag-layer-deny"`. */
 export type HandoffDenialReason = z.infer<typeof handoffDenialReason>;
 
 // ── intent payload ────────────────────────────────────────────────────────
@@ -77,10 +83,12 @@ export type HandoffDenialReason = z.infer<typeof handoffDenialReason>;
 // `verb` is opaque to the queue. `args` is `unknown` — the drainer for each
 // recipient validates the verb-specific arg shape with its own Zod at the
 // drain boundary (per I-HQ2: drain-time re-auth is the recipient's job).
+/** Zod schema for the intent payload: a verb name (non-empty) and opaque args validated at drain time. */
 export const handoffIntent = z.object({
   verb: z.string().min(1),
   args: z.unknown(),
 });
+/** The intent payload of a handoff: a verb name and opaque args that the draining recipient validates. */
 export type HandoffIntent = z.infer<typeof handoffIntent>;
 
 // ── policy-key tag (audit join hint) ──────────────────────────────────────
@@ -88,19 +96,23 @@ export type HandoffIntent = z.infer<typeof handoffIntent>;
 // Optional tag carried on policy-table denies so the audit substrate can
 // answer "denies without enqueue" with a cheap join. Absent on flag-layer
 // denies (the disallowedTools list does not carry tool/subcommand).
+/** Zod schema for the policy-key tag: tool, subcommand, state, and role — carried on policy-table deny enqueues as an audit join hint. */
 export const handoffPolicyKey = z.object({
   tool: z.string(),
   subcommand: z.string(),
   state: z.string(),
   role: z.string(),
 });
+/** A policy-key tag: tool + subcommand + state + role, carried on policy-table deny enqueues for audit correlation. */
 export type HandoffPolicyKey = z.infer<typeof handoffPolicyKey>;
 
 // ── worktree ref (publisher / author adapters need this) ──────────────────
+/** Zod schema for a worktree reference: absolute filesystem `path` and `branch` name. Required by publisher and author adapters. */
 export const handoffWorkTreeRef = z.object({
   path: z.string(),
   branch: z.string(),
 });
+/** A worktree reference: absolute `path` and `branch` name. Used by publisher and author drain adapters. */
 export type HandoffWorkTreeRef = z.infer<typeof handoffWorkTreeRef>;
 
 // ── envelope ──────────────────────────────────────────────────────────────
@@ -111,6 +123,10 @@ export type HandoffWorkTreeRef = z.infer<typeof handoffWorkTreeRef>;
 //
 // Cross-repo handoff is out of scope: enqueue refuses when
 // `repoSlug ≠ currentRepo`. A future epic owns cross-repo routing.
+/**
+ * Zod schema for a handoff envelope — one row per harness-denied verb.
+ * Persisted in bd memory; large `args` spill to plan-store CAS via `inputRefs`.
+ */
 export const handoffEnvelope = z.object({
   /** ULID. Stable identity for replay and audit joins. */
   id: z.string().min(1),
@@ -150,7 +166,10 @@ export const handoffEnvelope = z.object({
   lastError: z.string().optional(),
   workTreeRef: handoffWorkTreeRef.optional(),
 });
+/** A fully-parsed handoff envelope: all fields validated and defaults applied. Use when reading from bd memory. */
 export type HandoffEnvelope = z.infer<typeof handoffEnvelope>;
+
+/** The input shape of a {@link HandoffEnvelope} — fields with defaults (`inputRefs`, `attempts`, `maxAttempts`) are optional. Use when constructing an envelope for enqueueing. */
 export type HandoffEnvelopeInput = z.input<typeof handoffEnvelope>;
 
 // ── drain outcome ─────────────────────────────────────────────────────────
@@ -158,8 +177,11 @@ export type HandoffEnvelopeInput = z.input<typeof handoffEnvelope>;
 // Adapter contract: every recipient adapter returns one of these. The
 // drainer turns `{ ok: false }` into `HANDOFF_FAILED` and the machine
 // decides retry vs. abandon via `attempts < maxAttempts`.
+/** Zod schema for the outcome of a drain adapter: `{ ok: true }` on success or `{ ok: false, error: string }` on failure. */
 export const handoffDrainOutcome = z.union([
   z.object({ ok: z.literal(true) }),
   z.object({ ok: z.literal(false), error: z.string() }),
 ]);
+
+/** The outcome of a drain adapter call: `{ ok: true }` on success, `{ ok: false, error }` on failure. */
 export type HandoffDrainOutcome = z.infer<typeof handoffDrainOutcome>;
